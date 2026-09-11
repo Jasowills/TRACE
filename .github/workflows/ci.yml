@@ -1,0 +1,23 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: docker compose up -d
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx tsx src/migrate.ts
+        env:
+          DATABASE_URL: postgres://trace:trace@localhost:5432/trace
+      - run: npm test
+        env:
+          DATABASE_URL: postgres://trace:trace@localhost:5432/trace
+          REDIS_URL: redis://localhost:6379

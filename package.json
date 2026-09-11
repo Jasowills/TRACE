@@ -1,0 +1,30 @@
+{
+  "name": "trace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Telemetry Reconciliation And Correctness Engine — ingestion MCP for tracing events through the pipeline",
+  "type": "module",
+  "scripts": {
+    "producer": "tsx src/producer.ts",
+    "processor": "tsx src/processor.ts",
+    "mcp": "tsx src/mcp-server.ts",
+    "migrate": "tsx src/migrate.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/pg": "^8.11.0",
+    "fast-check": "^3.22.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}
