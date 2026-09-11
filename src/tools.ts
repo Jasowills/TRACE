@@ -24,6 +24,11 @@ export interface TraceEventResult {
 
 export async function traceEvent(eventId: string): Promise<TraceEventResult> {
   const pool = getPool();
+  // Boundary validation (A05/A10): non-UUID input fails closed as
+  // 'missing_unexpectedly' instead of throwing a pg type error up the stack.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(eventId)) {
+    return { event_id: eventId, producer_record: null, stages: [], final_status: "missing_unexpectedly" };
+  }
   const prod = await pool.query(
     `SELECT emitted_at, fault_applied, fault_meta FROM producer_log WHERE event_id = $1`,
     [eventId],
@@ -59,6 +64,18 @@ export async function traceEvent(eventId: string): Promise<TraceEventResult> {
   return { event_id: eventId, producer_record, stages, final_status };
 }
 
+/** Validate an optional ISO timestamp bound; throws a clean agent-readable error. */
+function parseTimeBound(name: string, value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  // Strict shape check first: Date.parse is dangerously lenient
+  // (it reads "' OR '1'='1" as a date), so it can't be the gate.
+  const iso = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+  if (!iso.test(value) || Number.isNaN(Date.parse(value))) {
+    throw new Error(`${name} must be an ISO timestamp, got: ${value.slice(0, 120)}`);
+  }
+  return value;
+}
+
 export interface DroppedEvent {
   event_id: string;
   expected: boolean;
@@ -69,15 +86,17 @@ export async function findDroppedEvents(opts?: {
   since?: string;
   until?: string;
 }): Promise<{ count: number; events: DroppedEvent[] }> {
+  const since = parseTimeBound("since", opts?.since);
+  const until = parseTimeBound("until", opts?.until);
   const pool = getPool();
   const conditions: string[] = [];
   const params: string[] = [];
-  if (opts?.since) {
-    params.push(opts.since);
+  if (since) {
+    params.push(since);
     conditions.push(`p.emitted_at >= $${params.length}`);
   }
-  if (opts?.until) {
-    params.push(opts.until);
+  if (until) {
+    params.push(until);
     conditions.push(`p.emitted_at <= $${params.length}`);
   }
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -124,15 +143,17 @@ export async function findDuplicateEvents(opts?: {
   since?: string;
   until?: string;
 }): Promise<{ count: number; events: DuplicateEvent[] }> {
+  const since = parseTimeBound("since", opts?.since);
+  const until = parseTimeBound("until", opts?.until);
   const pool = getPool();
   const conditions: string[] = ["p.fault_applied = 'duplicated'"];
   const params: string[] = [];
-  if (opts?.since) {
-    params.push(opts.since);
+  if (since) {
+    params.push(since);
     conditions.push(`p.emitted_at >= $${params.length}`);
   }
-  if (opts?.until) {
-    params.push(opts.until);
+  if (until) {
+    params.push(until);
     conditions.push(`p.emitted_at <= $${params.length}`);
   }
   const res = await pool.query(

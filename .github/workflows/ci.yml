@@ -21,3 +21,31 @@ jobs:
         env:
           DATABASE_URL: postgres://trace:trace@localhost:5432/trace
           REDIS_URL: redis://localhost:6379
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      # Gate: no high/critical vulns in production dependencies.
+      # (Dev-only vite/vitest advisories are tracked as accepted risk in
+      # owasp-coverage.md, not as a merge blocker.)
+      - name: dependency gate (prod only)
+        run: npm audit --omit=dev --audit-level=high
+      # Full audit surfaced for review on every run.
+      - name: full audit report
+        run: npm audit --json > audit.json || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit
+          path: audit.json
+          if-no-files-found: error
+      # Secret scan: no verified-pattern secrets in tracked files.
+      - name: secret grep gate
+        run: |
+          ! grep -rniE "gho_[A-Za-z0-9]{20,}|sk-(live|test)-[A-Za-z0-9]+|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY" \
+            --include="*.ts" --include="*.json" --include="*.yml" --include="*.example" --include="*.md" \
+            src tests .github README.md owasp-coverage.md package.json .env.example
