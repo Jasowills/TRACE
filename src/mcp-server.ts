@@ -17,6 +17,30 @@ function toText(obj: unknown): string {
   return JSON.stringify(obj, null, 2);
 }
 
+/**
+ * Extract a non-empty message from anything thrown, including pg
+ * AggregateError (whose .message is empty — ADV-0007). Agents get the
+ * underlying reason instead of a blank error.
+ */
+function errorDetail(err: unknown): string {
+  if (err instanceof AggregateError) {
+    const parts = err.errors.map((e) =>
+      e instanceof Error ? (e.message || e.name) : String(e),
+    );
+    return parts.length > 0 ? parts.join("; ") : "dependency error (no detail)";
+  }
+  if (err instanceof Error) return err.message || err.name;
+  return String(err);
+}
+
+async function runTool<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    throw new Error(`${name} failed: ${errorDetail(err)}`);
+  }
+}
+
 export function createServer(): McpServer {
   const server = new McpServer({ name: "trace", version: "0.1.0" });
 
@@ -31,7 +55,7 @@ export function createServer(): McpServer {
       "'missing_unexpectedly' means it was sent but has no trace at all (a real loss).",
     { event_id: z.string().describe("UUID of the event to trace") },
     async ({ event_id }) => ({
-      content: [{ type: "text", text: toText(await traceEvent(event_id)) }],
+      content: [{ type: "text", text: toText(await runTool("trace_event", () => traceEvent(event_id))) }],
     }),
   );
 
@@ -48,7 +72,7 @@ export function createServer(): McpServer {
       until: z.string().optional().describe("ISO timestamp upper bound on emitted_at"),
     },
     async ({ since, until }) => ({
-      content: [{ type: "text", text: toText(await findDroppedEvents({ since, until })) }],
+      content: [{ type: "text", text: toText(await runTool("find_dropped_events", () => findDroppedEvents({ since, until }))) }],
     }),
   );
 
@@ -64,7 +88,7 @@ export function createServer(): McpServer {
       until: z.string().optional().describe("ISO timestamp upper bound on emitted_at"),
     },
     async ({ since, until }) => ({
-      content: [{ type: "text", text: toText(await findDuplicateEvents({ since, until })) }],
+      content: [{ type: "text", text: toText(await runTool("find_duplicate_events", () => findDuplicateEvents({ since, until }))) }],
     }),
   );
 
@@ -78,7 +102,7 @@ export function createServer(): McpServer {
       "first when asking whether the pipeline is keeping up or losing events.",
     {},
     async () => ({
-      content: [{ type: "text", text: toText(await pipelineHealth()) }],
+      content: [{ type: "text", text: toText(await runTool("pipeline_health", pipelineHealth)) }],
     }),
   );
 

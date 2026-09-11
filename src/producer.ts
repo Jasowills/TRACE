@@ -104,6 +104,14 @@ export interface ProduceResult {
   dropped: number;
   duplicated: number;
   delayed: number;
+  /** Stream writes that failed after the ground-truth row was recorded. */
+  sendFailed: number;
+}
+
+function sendErrorDetail(err: unknown): string {
+  if (err instanceof AggregateError)
+    return err.errors.map((e) => (e as Error)?.message ?? String(e)).join("; ");
+  return err instanceof Error ? err.message : String(err);
 }
 
 export async function produce(opts: ProducerOptions): Promise<ProduceResult> {
@@ -119,7 +127,56 @@ export async function produce(opts: ProducerOptions): Promise<ProduceResult> {
     dropped: 0,
     duplicated: 0,
     delayed: 0,
+    sendFailed: 0,
   };
+
+  // Ground truth FIRST (ADV-0004): the producer_log row is written before the
+  // stream entry, so a crash can only leave "row without stream entry"
+  // (detectable as unexpected loss) — never "stream entry without row"
+  // (an invisible phantom). A failed send is recorded on the row and the
+  // batch continues instead of aborting.
+  const recordGroundTruth = (
+    eventId: string,
+    emittedAt: string,
+    fault: FaultApplied,
+    meta: Record<string, unknown>,
+  ) =>
+    pool.query(
+      `INSERT INTO producer_log (event_id, emitted_at, fault_applied, fault_meta)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (event_id) DO UPDATE SET
+         fault_applied = EXCLUDED.fault_applied,
+         fault_meta = EXCLUDED.fault_meta`,
+      [eventId, emittedAt, fault, JSON.stringify(meta)],
+    );
+
+  const markSendFailed = (eventId: string, err: unknown) =>
+    pool.query(
+      `UPDATE producer_log
+       SET fault_meta = COALESCE(fault_meta, '{}'::jsonb) || $2
+       WHERE event_id = $1`,
+      [eventId, JSON.stringify({ send_failed: true, send_error: sendErrorDetail(err).slice(0, 300) })],
+    );
+
+  const sendOnce = async (eventId: string, payload: string): Promise<boolean> => {
+    try {
+      await redis.xadd(STREAM_NAME, "*", "event_id", eventId, "body", payload);
+      result.sent++;
+      return true;
+    } catch (err) {
+      await markSendFailed(eventId, err);
+      result.sendFailed++;
+      return false;
+    }
+  };
+
+  const makePayload = (eventId: string, emittedAt: string, i: number) =>
+    JSON.stringify({
+      event_id: eventId,
+      emitted_at: emittedAt,
+      index: i,
+      data: { seq: i, note: "synthetic" },
+    });
 
   for (let i = 0; i < opts.events; i++) {
     const fault = faults[i];
@@ -128,73 +185,33 @@ export async function produce(opts: ProducerOptions): Promise<ProduceResult> {
 
     if (fault === "dropped_before_send") {
       // Recorded in ground truth, NEVER sent to the stream.
-      await pool.query(
-        `INSERT INTO producer_log (event_id, emitted_at, fault_applied, fault_meta)
-         VALUES ($1, $2, 'dropped_before_send', $3)`,
-        [eventId, emittedAt, JSON.stringify({})],
-      );
+      await recordGroundTruth(eventId, emittedAt, "dropped_before_send", {});
       result.dropped++;
       continue;
     }
 
     if (fault === "delayed") {
       // emitted_at is stamped BEFORE the hold so received - emitted_at >= delayMs.
+      await recordGroundTruth(eventId, emittedAt, "delayed", { delay_ms: opts.delayMs });
       await sleep(opts.delayMs);
-      const payload = JSON.stringify({
-        event_id: eventId,
-        emitted_at: emittedAt,
-        index: i,
-        data: { seq: i, note: "synthetic" },
-      });
-      await redis.xadd(STREAM_NAME, "*", "event_id", eventId, "body", payload);
-      await pool.query(
-        `INSERT INTO producer_log (event_id, emitted_at, fault_applied, fault_meta)
-         VALUES ($1, $2, 'delayed', $3)`,
-        [eventId, emittedAt, JSON.stringify({ delay_ms: opts.delayMs })],
-      );
-      result.sent++;
-      result.delayed++;
+      if (await sendOnce(eventId, makePayload(eventId, emittedAt, i))) result.delayed++;
       continue;
     }
 
     if (fault === "duplicated") {
-      const payload = JSON.stringify({
-        event_id: eventId,
-        emitted_at: emittedAt,
-        index: i,
-        data: { seq: i, note: "synthetic" },
-      });
-      // Sent TWICE with the same event_id.
-      await redis.xadd(STREAM_NAME, "*", "event_id", eventId, "body", payload);
-      await redis.xadd(STREAM_NAME, "*", "event_id", eventId, "body", payload);
       // Upsert: single ground-truth row marked duplicated (PK prevents 2 rows).
-      await pool.query(
-        `INSERT INTO producer_log (event_id, emitted_at, fault_applied, fault_meta)
-         VALUES ($1, $2, 'duplicated', $3)
-         ON CONFLICT (event_id) DO UPDATE SET
-           fault_applied = EXCLUDED.fault_applied,
-           fault_meta = EXCLUDED.fault_meta`,
-        [eventId, emittedAt, JSON.stringify({ duplicate_of: eventId })],
-      );
-      result.sent += 2;
-      result.duplicated++;
+      await recordGroundTruth(eventId, emittedAt, "duplicated", { duplicate_of: eventId });
+      // Sent TWICE with the same event_id.
+      const payload = makePayload(eventId, emittedAt, i);
+      const first = await sendOnce(eventId, payload);
+      const second = await sendOnce(eventId, payload);
+      if (first && second) result.duplicated++;
       continue;
     }
 
     // Normal path.
-    const payload = JSON.stringify({
-      event_id: eventId,
-      emitted_at: emittedAt,
-      index: i,
-      data: { seq: i, note: "synthetic" },
-    });
-    await redis.xadd(STREAM_NAME, "*", "event_id", eventId, "body", payload);
-    await pool.query(
-      `INSERT INTO producer_log (event_id, emitted_at, fault_applied, fault_meta)
-       VALUES ($1, $2, 'none', $3)`,
-      [eventId, emittedAt, JSON.stringify({})],
-    );
-    result.sent++;
+    await recordGroundTruth(eventId, emittedAt, "none", {});
+    await sendOnce(eventId, makePayload(eventId, emittedAt, i));
   }
 
   redis.disconnect();
@@ -207,13 +224,17 @@ async function main(): Promise<void> {
   const res = await produce(opts);
   console.log(JSON.stringify(res));
   await closePool();
+  if (res.sendFailed > 0) {
+    console.error(`${res.sendFailed} events failed to send (marked send_failed in producer_log)`);
+    process.exit(1);
+  }
   process.exit(0);
 }
 
 // Run as CLI only when executed directly, not when imported by tests.
 if (process.argv[1]?.endsWith("producer.ts")) {
   main().catch(async (err) => {
-    console.error(err);
+    console.error(`producer aborted: ${sendErrorDetail(err)}`);
     await closePool();
     process.exit(1);
   });

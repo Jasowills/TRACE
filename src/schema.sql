@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS producer_log (
 
 
 -- Append-only. One row per (event_id, stage) transition observed by the pipeline.
+-- The UNIQUE constraint is load-bearing: it makes the idempotency guard
+-- atomic (INSERT ... ON CONFLICT DO NOTHING) so concurrent workers cannot
+-- double-write a stage (see ADV-0002).
 CREATE TABLE IF NOT EXISTS event_trace_log (
   id            BIGSERIAL PRIMARY KEY,
   event_id      UUID NOT NULL,
@@ -34,3 +37,14 @@ CREATE TABLE IF NOT EXISTS sink_events (
   payload       JSONB NOT NULL,
   written_at    TIMESTAMPTZ NOT NULL
 );
+
+-- Idempotency backstop (ADV-0002): exactly one row per (event_id, stage).
+-- The plain DELETE collapses any duplicates first (no-op on clean DBs),
+-- then the unique index makes INSERT ... ON CONFLICT (event_id, stage)
+-- atomic. Both statements are safe to re-run on every migrate.
+DELETE FROM event_trace_log a USING event_trace_log b
+  WHERE a.id > b.id
+    AND a.event_id = b.event_id
+    AND a.stage = b.stage;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_trace_event_stage
+  ON event_trace_log (event_id, stage);

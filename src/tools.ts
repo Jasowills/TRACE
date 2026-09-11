@@ -84,7 +84,7 @@ export async function findDroppedEvents(opts?: {
   // An event is "dropped" if ground truth says it was emitted but there is
   // no 'written' trace entry and no sink row.
   const res = await pool.query(
-    `SELECT p.event_id, p.fault_applied
+    `SELECT p.event_id, p.fault_applied, p.fault_meta
      FROM producer_log p
      LEFT JOIN (
        SELECT DISTINCT event_id FROM event_trace_log WHERE stage = 'written'
@@ -97,12 +97,18 @@ export async function findDroppedEvents(opts?: {
   );
   const events: DroppedEvent[] = res.rows.map((r) => {
     const expected = r.fault_applied === "dropped_before_send";
+    const sendFailed =
+      typeof r.fault_meta === "object" &&
+      r.fault_meta !== null &&
+      (r.fault_meta as Record<string, unknown>).send_failed === true;
     return {
       event_id: r.event_id as string,
       expected,
       reason: expected
         ? "deliberate fault: producer recorded dropped_before_send and never sent to stream"
-        : "unexpected loss: producer sent the event but it never reached the sink",
+        : sendFailed
+          ? "producer failed to send this event (transport error recorded in fault_meta) — it never reached the stream"
+          : "unexpected loss: producer sent the event but it never reached the sink",
     };
   });
   return { count: events.length, events };
