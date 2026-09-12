@@ -73,7 +73,10 @@ Now connect an MCP client to the server. With Claude Desktop, add this to
 ```
 
 (Or point any MCP Inspector-style client at `npx tsx src/mcp-server.ts`, which
-uses the stdio transport.)
+uses the stdio transport. Note: some clients launch servers with an unfamiliar
+working directory — if `tsx` isn't resolved, replace `"command": "npx"` with
+the absolute path to your `node` binary and `"args"` with
+`["/absolute/path/to/TRACE/node_modules/tsx/dist/cli.mjs", "/absolute/path/to/TRACE/src/mcp-server.ts"]`.)
 
 Then ask:
 

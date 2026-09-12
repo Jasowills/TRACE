@@ -94,8 +94,10 @@ export function createServer(): McpServer {
 
   server.tool(
     "pipeline_health",
-    "Report current pipeline health: stream_length (pending entries in the Redis " +
-      "stream), consumer_lag (unacknowledged messages in the ingest-worker group), " +
+    "Report current pipeline health: stream_length (total entries retained in " +
+      "the Redis stream, INCLUDING already-consumed history — it only grows; " +
+      "use consumer_lag for the actual backlog), consumer_lag (unacknowledged " +
+      "messages in the ingest-worker group — the real 'is it keeping up' number), " +
       "events_per_second_5min (sink writes over the last 5 minutes), and " +
       "error_rate_5min (share of non-deliberately-dropped events emitted in the " +
       "last 5 minutes with no written trace entry). Takes no arguments. Use this " +
